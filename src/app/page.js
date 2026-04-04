@@ -33,7 +33,7 @@ export default function App() {
 
     try {
       // Direct all intelligence through our strict backend controller
-      const res = await fetchWithRetry("http://localhost:8000/agent", {
+      const res = await fetchWithRetry("/api/agent", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query: userQuery })
