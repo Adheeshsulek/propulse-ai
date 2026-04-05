@@ -6,7 +6,7 @@ from pydantic import BaseModel
 import google.generativeai as genai
 from dotenv import load_dotenv
 
-# Try-except block to handle different deployment pathing environments
+# Path handling for deployment
 try:
     from .data import PROPERTIES
 except ImportError:
@@ -14,17 +14,17 @@ except ImportError:
 
 load_dotenv()
 
-# Configure Gemini
+# 1. Configure Gemini with REST transport to prevent 404/gRPC issues on Vercel
 api_key = os.environ.get("GEMINI_API_KEY")
 if not api_key:
-    # On Vercel, this will come from Environment Variables in the dashboard
     print("WARNING: GEMINI_API_KEY not found")
 else:
-    genai.configure(api_key=api_key)
+    # transport='rest' is the key for stable serverless connectivity
+    genai.configure(api_key=api_key, transport='rest')
 
 app = FastAPI(title="Propulse AI Backend")
 
-# Production CORS setup - Allow all origins so Vercel Frontend can talk to Vercel Backend
+# 2. CORS setup - allowing all for Vercel deployment
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
@@ -37,8 +37,8 @@ class AgentRequest(BaseModel):
     query: str
 
 def extract_intent(query: str):
-    # Fixed model name to gemini-1.5-flash
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    # Use 'gemini-1.5-flash-latest' for the most stable endpoint
+    model = genai.GenerativeModel('gemini-1.5-flash-latest')
     prompt = f"""
     Extract real estate filters from the user query. Return ONLY valid JSON with:
     {{
@@ -60,10 +60,13 @@ def extract_intent(query: str):
 
 def generate_explanations(intent, top_properties):
     if not top_properties:
-        return {"reply": "I couldn't find any properties matching those exact criteria.", "insights": []}
+        return {"reply": "I couldn't find any properties matching those criteria.", "insights": []}
         
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    props_context = [{"id": p["id"], "title": p["title"], "price": p["formatted_price"], "bhk": p["bhk"], "location": p["location"]} for p in top_properties]
+    model = genai.GenerativeModel('gemini-1.5-flash-latest')
+    props_context = [
+        {"id": p["id"], "title": p["title"], "price": p["formatted_price"], "bhk": p["bhk"], "location": p["location"]} 
+        for p in top_properties
+    ]
     
     prompt = f"""
     You are Propulse AI, a professional real estate agent.
@@ -86,7 +89,7 @@ def generate_explanations(intent, top_properties):
 
 @app.get("/")
 def read_root():
-    return {"status": "Propulse AI API is running"}
+    return {"status": "Propulse AI API is running", "properties_loaded": len(PROPERTIES)}
 
 @app.post("/api/agent")
 @app.post("/agent")
@@ -95,32 +98,34 @@ async def run_agent(req: AgentRequest):
         intent = extract_intent(req.query)
         scored_props = []
         
-        # Filtering logic
+        # 3. Filtering logic (Matching against your 100+ properties)
         for p in PROPERTIES:
-            # Price filtering
+            # Skip if strict criteria (Price/BHK) don't match
             if intent.get("max_price") and p["price"] > intent["max_price"]:
                 continue
-            # BHK filtering
             if intent.get("bhk") and p["bhk"] != intent["bhk"]:
                 continue
                 
             score = 0
-            # Location scoring
-            if intent.get("location") and intent["location"].lower() in p["location"].lower():
-                score += 10
+            # Fuzzy location scoring
+            if intent.get("location"):
+                u_loc = intent["location"].lower()
+                p_loc = p["location"].lower()
+                if u_loc in p_loc or p_loc in u_loc:
+                    score += 50
             
             scored_props.append({"property": p, "score": score})
             
         scored_props.sort(key=lambda x: x["score"], reverse=True)
         top_3 = [item["property"] for item in scored_props[:3]]
         
+        # 4. Generate AI explanations for why these were picked
         ai_data = generate_explanations(intent, top_3)
         
         final_matches = []
         for p in top_3:
             insight_list = ai_data.get("insights", [])
-            # Find the insight for this specific property ID
-            insight = "Ideal match for your needs."
+            insight = "Ideal match for your preferences."
             for item in insight_list:
                 if str(item.get("id")) == str(p.get("id")):
                     insight = item.get("ai_insight", insight)
@@ -131,9 +136,9 @@ async def run_agent(req: AgentRequest):
             final_matches.append(p_with_insight)
             
         return {
-            "reply": ai_data.get("reply", "Here are the best matches."),
+            "reply": ai_data.get("reply", "Here are the top picks based on your search."),
             "matches": final_matches
         }
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Deployment Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
