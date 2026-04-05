@@ -14,17 +14,17 @@ except ImportError:
 
 load_dotenv()
 
-# 1. Configure Gemini with REST transport
+# 1. Configure Gemini with REST transport for Vercel Serverless stability
 api_key = os.environ.get("GEMINI_API_KEY")
 if not api_key:
     print("WARNING: GEMINI_API_KEY not found")
 else:
-    # Essential for Vercel Serverless stability
+    # Explicitly using REST transport avoids gRPC handshake errors on Vercel
     genai.configure(api_key=api_key, transport='rest')
 
 app = FastAPI(title="Propulse AI Backend")
 
-# 2. CORS setup
+# 2. CORS setup for global access
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
@@ -37,7 +37,8 @@ class AgentRequest(BaseModel):
     query: str
 
 def extract_intent(query: str):
-    model = genai.GenerativeModel('gemini-1.5-flash-latest')
+    # CRITICAL FIX: Using the full model path to avoid 404 versioning errors
+    model = genai.GenerativeModel(model_name='models/gemini-1.5-flash')
     prompt = f"""
     Extract real estate filters from the user query. Return ONLY valid JSON with:
     {{
@@ -61,7 +62,8 @@ def generate_explanations(intent, top_properties):
     if not top_properties:
         return {"reply": "I couldn't find any properties matching those criteria.", "insights": []}
         
-    model = genai.GenerativeModel('gemini-1.5-flash-latest')
+    # CRITICAL FIX: Using the full model path here as well
+    model = genai.GenerativeModel(model_name='models/gemini-1.5-flash')
     props_context = [
         {
             "id": p["id"], 
@@ -91,7 +93,7 @@ def generate_explanations(intent, top_properties):
     )
     return json.loads(response.text)
 
-# DUAL ROUTE MAPPING: Fixes the {"detail":"Not Found"} error
+# DUAL ROUTE MAPPING: Fixes the {"detail":"Not Found"} error on Vercel root
 @app.get("/")
 @app.get("/api")
 def read_root():
@@ -100,7 +102,7 @@ def read_root():
         "total_properties": len(PROPERTIES)
     }
 
-# DUAL ROUTE MAPPING: Ensures frontend fetch works regardless of prefix
+# DUAL ROUTE MAPPING: Fixes the 404 on POST requests
 @app.post("/api/agent")
 @app.post("/agent")
 async def run_agent(req: AgentRequest):
@@ -110,12 +112,14 @@ async def run_agent(req: AgentRequest):
         
         # Filtering logic
         for p in PROPERTIES:
+            # Basic strict filtering
             if intent.get("max_price") and p["price"] > intent["max_price"]:
                 continue
             if intent.get("bhk") and p["bhk"] != intent["bhk"]:
                 continue
                 
             score = 0
+            # Fuzzy location matching
             if intent.get("location"):
                 u_loc = intent["location"].lower()
                 p_loc = p["location"].lower()
@@ -124,9 +128,11 @@ async def run_agent(req: AgentRequest):
             
             scored_props.append({"property": p, "score": score})
             
+        # Sort by relevance and take top 3
         scored_props.sort(key=lambda x: x["score"], reverse=True)
         top_3 = [item["property"] for item in scored_props[:3]]
         
+        # AI Logic
         ai_data = generate_explanations(intent, top_3)
         
         final_matches = []
@@ -148,4 +154,5 @@ async def run_agent(req: AgentRequest):
         }
     except Exception as e:
         print(f"Deployment Error: {e}")
+        # Explicitly return the error string to help with frontend debugging
         raise HTTPException(status_code=500, detail=str(e))
