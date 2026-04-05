@@ -1,9 +1,9 @@
 import os
 import json
+import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import google.generativeai as genai
 from dotenv import load_dotenv
 
 # Path handling for deployment
@@ -14,12 +14,8 @@ except ImportError:
 
 load_dotenv()
 
-# Configure Gemini (FIXED)
-api_key = os.environ.get("GEMINI_API_KEY")
-if not api_key:
-    print("WARNING: GEMINI_API_KEY not found")
-else:
-    genai.configure(api_key=api_key, transport='rest')
+# Gemini REST API (FIXED - no more v1beta issues)
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-pro-latest:generateContent"
 
 app = FastAPI(title="Propulse AI Backend")
 
@@ -36,79 +32,80 @@ class AgentRequest(BaseModel):
     query: str
 
 
-# ✅ FIXED MODEL HERE
-def extract_intent(query: str):
-    model = genai.GenerativeModel(
-        model_name='models/gemini-1.5-flash-latest'
+# 🔥 Gemini caller (SAFE + STABLE)
+def call_gemini(prompt):
+    response = requests.post(
+        GEMINI_URL,
+        headers={
+            "Content-Type": "application/json",
+            "x-goog-api-key": os.environ.get("GEMINI_API_KEY"),
+        },
+        json={
+            "contents": [
+                {
+                    "parts": [{"text": prompt}]
+                }
+            ]
+        }
     )
 
+    data = response.json()
+
+    try:
+        return data["candidates"][0]["content"]["parts"][0]["text"]
+    except:
+        print("Gemini error:", data)
+        return "{}"
+
+
+# Extract intent from user query
+def extract_intent(query: str):
     prompt = f"""
-    Extract real estate filters from the user query. Return ONLY valid JSON with:
+    Extract real estate filters from the user query. Return ONLY valid JSON:
     {{
         "location": string or null,
         "max_price": integer or null,
         "bhk": integer or null,
-        "amenities": [list of strings]
+        "amenities": []
     }}
-    User Query: "{query}"
+    Query: "{query}"
     """
 
-    response = model.generate_content(
-        prompt,
-        generation_config=genai.GenerationConfig(
-            response_mime_type="application/json",
-            temperature=0
-        )
-    )
+    response_text = call_gemini(prompt)
 
-    return json.loads(response.text)
+    try:
+        return json.loads(response_text)
+    except:
+        return {}
 
 
-# ✅ FIXED MODEL HERE ALSO
+# Generate explanations
 def generate_explanations(intent, top_properties):
     if not top_properties:
-        return {
-            "reply": "I couldn't find any properties matching those criteria.",
-            "insights": []
-        }
-
-    model = genai.GenerativeModel(
-        model_name='models/gemini-1.5-flash-latest'
-    )
-
-    props_context = [
-        {
-            "id": p["id"],
-            "title": p["title"],
-            "price": p["formatted_price"],
-            "bhk": p["bhk"],
-            "location": p["location"]
-        } for p in top_properties
-    ]
+        return {"reply": "No matching properties found.", "insights": []}
 
     prompt = f"""
     You are Propulse AI, a professional real estate agent.
+
     User intent: {json.dumps(intent)}
-    Selected properties: {json.dumps(props_context)}
-    Explain why these match the user's needs. Return ONLY JSON:
+    Properties: {json.dumps(top_properties)}
+
+    Return ONLY JSON:
     {{
-        "reply": "1-sentence professional opening.",
-        "insights": [{{ "id": "property_id", "ai_insight": "1 persuasive sentence." }}]
+        "reply": "Short professional response",
+        "insights": [{{"id": "id", "ai_insight": "text"}}]
     }}
     """
 
-    response = model.generate_content(
-        prompt,
-        generation_config=genai.GenerationConfig(
-            response_mime_type="application/json",
-            temperature=0.2
-        )
-    )
+    response_text = call_gemini(prompt)
 
-    return json.loads(response.text)
+    try:
+        return json.loads(response_text)
+    except:
+        return {"reply": "Here are some good options for you.", "insights": []}
 
 
-# Root check
+# Root route (health check)
 @app.get("/")
 @app.get("/api")
 def read_root():
@@ -118,7 +115,7 @@ def read_root():
     }
 
 
-# Main Agent Route
+# Main agent endpoint
 @app.post("/api/agent")
 @app.post("/agent")
 async def run_agent(req: AgentRequest):
