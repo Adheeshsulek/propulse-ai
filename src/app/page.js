@@ -97,7 +97,7 @@ export default function App() {
               </span>
               Propulse AI
             </h1>
-            <p className="text-xs text-zinc-500 mt-1 uppercase tracking-widest">Powered by Gemini 1.5 Flash</p>
+            <p className="text-xs text-zinc-500 mt-1 uppercase tracking-widest">AI Powered Real Estate Intelligence</p>
           </div>
           <button 
             onClick={() => {setDisplayedProperties([]); setMessages([{ role: "ai", content: "Portfolio reset. What are you looking for?" }]);}} 
