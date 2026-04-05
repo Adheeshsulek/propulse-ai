@@ -6,24 +6,28 @@ from pydantic import BaseModel
 import google.generativeai as genai
 from dotenv import load_dotenv
 
-# Ensure this matches the filename data.py in the same folder
-from data import PROPERTIES
+# Try-except block to handle different deployment pathing environments
+try:
+    from .data import PROPERTIES
+except ImportError:
+    from data import PROPERTIES
 
 load_dotenv()
 
 # Configure Gemini
 api_key = os.environ.get("GEMINI_API_KEY")
 if not api_key:
-    print("WARNING: GEMINI_API_KEY not found in .env file")
+    # On Vercel, this will come from Environment Variables in the dashboard
+    print("WARNING: GEMINI_API_KEY not found")
 else:
     genai.configure(api_key=api_key)
 
 app = FastAPI(title="Propulse AI Backend")
 
-# CORS setup
+# Production CORS setup - Allow all origins so Vercel Frontend can talk to Vercel Backend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"], 
+    allow_origins=["*"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -33,7 +37,8 @@ class AgentRequest(BaseModel):
     query: str
 
 def extract_intent(query: str):
-    model = genai.GenerativeModel('gemini-2.5-flash')
+    # Fixed model name to gemini-1.5-flash
+    model = genai.GenerativeModel('gemini-1.5-flash')
     prompt = f"""
     Extract real estate filters from the user query. Return ONLY valid JSON with:
     {{
@@ -57,7 +62,7 @@ def generate_explanations(intent, top_properties):
     if not top_properties:
         return {"reply": "I couldn't find any properties matching those exact criteria.", "insights": []}
         
-    model = genai.GenerativeModel('gemini-2.5-flash')
+    model = genai.GenerativeModel('gemini-1.5-flash')
     props_context = [{"id": p["id"], "title": p["title"], "price": p["formatted_price"], "bhk": p["bhk"], "location": p["location"]} for p in top_properties]
     
     prompt = f"""
@@ -79,6 +84,11 @@ def generate_explanations(intent, top_properties):
     )
     return json.loads(response.text)
 
+@app.get("/")
+def read_root():
+    return {"status": "Propulse AI API is running"}
+
+@app.post("/api/agent")
 @app.post("/agent")
 async def run_agent(req: AgentRequest):
     try:
@@ -87,12 +97,15 @@ async def run_agent(req: AgentRequest):
         
         # Filtering logic
         for p in PROPERTIES:
+            # Price filtering
             if intent.get("max_price") and p["price"] > intent["max_price"]:
                 continue
+            # BHK filtering
             if intent.get("bhk") and p["bhk"] != intent["bhk"]:
                 continue
                 
             score = 0
+            # Location scoring
             if intent.get("location") and intent["location"].lower() in p["location"].lower():
                 score += 10
             
@@ -105,7 +118,14 @@ async def run_agent(req: AgentRequest):
         
         final_matches = []
         for p in top_3:
-            insight = next((item["ai_insight"] for item in ai_data.get("insights", []) if item["id"] == p["id"]), "Ideal match for your needs.")
+            insight_list = ai_data.get("insights", [])
+            # Find the insight for this specific property ID
+            insight = "Ideal match for your needs."
+            for item in insight_list:
+                if str(item.get("id")) == str(p.get("id")):
+                    insight = item.get("ai_insight", insight)
+                    break
+                    
             p_with_insight = p.copy()
             p_with_insight["ai_insight"] = insight
             final_matches.append(p_with_insight)
