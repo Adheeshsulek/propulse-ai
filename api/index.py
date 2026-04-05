@@ -14,17 +14,17 @@ except ImportError:
 
 load_dotenv()
 
-# 1. Configure Gemini with REST transport to prevent 404/gRPC issues on Vercel
+# 1. Configure Gemini with REST transport
 api_key = os.environ.get("GEMINI_API_KEY")
 if not api_key:
     print("WARNING: GEMINI_API_KEY not found")
 else:
-    # transport='rest' is the key for stable serverless connectivity
+    # Essential for Vercel Serverless stability
     genai.configure(api_key=api_key, transport='rest')
 
 app = FastAPI(title="Propulse AI Backend")
 
-# 2. CORS setup - allowing all for Vercel deployment
+# 2. CORS setup
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
@@ -37,7 +37,6 @@ class AgentRequest(BaseModel):
     query: str
 
 def extract_intent(query: str):
-    # Use 'gemini-1.5-flash-latest' for the most stable endpoint
     model = genai.GenerativeModel('gemini-1.5-flash-latest')
     prompt = f"""
     Extract real estate filters from the user query. Return ONLY valid JSON with:
@@ -64,8 +63,13 @@ def generate_explanations(intent, top_properties):
         
     model = genai.GenerativeModel('gemini-1.5-flash-latest')
     props_context = [
-        {"id": p["id"], "title": p["title"], "price": p["formatted_price"], "bhk": p["bhk"], "location": p["location"]} 
-        for p in top_properties
+        {
+            "id": p["id"], 
+            "title": p["title"], 
+            "price": p["formatted_price"], 
+            "bhk": p["bhk"], 
+            "location": p["location"]
+        } for p in top_properties
     ]
     
     prompt = f"""
@@ -87,10 +91,16 @@ def generate_explanations(intent, top_properties):
     )
     return json.loads(response.text)
 
+# DUAL ROUTE MAPPING: Fixes the {"detail":"Not Found"} error
 @app.get("/")
+@app.get("/api")
 def read_root():
-    return {"status": "Propulse AI API is running", "properties_loaded": len(PROPERTIES)}
+    return {
+        "status": "Propulse AI API is running", 
+        "total_properties": len(PROPERTIES)
+    }
 
+# DUAL ROUTE MAPPING: Ensures frontend fetch works regardless of prefix
 @app.post("/api/agent")
 @app.post("/agent")
 async def run_agent(req: AgentRequest):
@@ -98,16 +108,14 @@ async def run_agent(req: AgentRequest):
         intent = extract_intent(req.query)
         scored_props = []
         
-        # 3. Filtering logic (Matching against your 100+ properties)
+        # Filtering logic
         for p in PROPERTIES:
-            # Skip if strict criteria (Price/BHK) don't match
             if intent.get("max_price") and p["price"] > intent["max_price"]:
                 continue
             if intent.get("bhk") and p["bhk"] != intent["bhk"]:
                 continue
                 
             score = 0
-            # Fuzzy location scoring
             if intent.get("location"):
                 u_loc = intent["location"].lower()
                 p_loc = p["location"].lower()
@@ -119,7 +127,6 @@ async def run_agent(req: AgentRequest):
         scored_props.sort(key=lambda x: x["score"], reverse=True)
         top_3 = [item["property"] for item in scored_props[:3]]
         
-        # 4. Generate AI explanations for why these were picked
         ai_data = generate_explanations(intent, top_3)
         
         final_matches = []
